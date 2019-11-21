@@ -1,68 +1,86 @@
 package otus8
 
 import (
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
-func Init(tasks []func() error, runCount, errorCount int) {
+func Starting(tasks []func() error, workersCnt, maxErrorCnt int) {
 	var (
-		signalStop, signalError, runningChan chan bool
-		errCount                             int
-		wg                                   sync.WaitGroup
-		runnig                               int
+		taskChan                                               chan func() error
+		errOut, finishAll, finishError, doneWorkers, doneError chan bool
 	)
+	taskChan = make(chan func() error)
+	errOut = make(chan bool)
+	finishAll = make(chan bool)
 
-	signalStop = make(chan bool)
-	runningChan = make(chan bool)
-	signalError = make(chan bool, runCount)
+	var waitgroup sync.WaitGroup
+	for i := 0; i < workersCnt; i++ {
+		go worker(taskChan, errOut, finishAll, &waitgroup)
+	}
 
-	go func(runningChan <-chan bool, runnig *int) {
-		select {
-		case val := <-runningChan:
-			if val {
-				fmt.Println("+1")
-				*runnig++
-			} else {
-				fmt.Println("-1")
-				*runnig--
-			}
-		}
-	}(runningChan, &runnig)
-
-	select {
-	case <-signalStop:
-		fmt.Println("Waiting...")
-		wg.Wait()
-		return
-	case <-signalError:
-		errCount++
-		if errCount == errorCount {
-			fmt.Printf("Error count:%v\n", errCount)
-			return
-		}
-	default:
-		if runnig < runCount {
-			wg.Add(1)
-			go func(signalError chan bool, f func() error, runningChan chan<- bool) {
-				fmt.Println("Starting func")
-				runningChan <- true
-				defer func(runningChan chan<- bool) {
-					runningChan <- false
-					wg.Done()
-				}(runningChan)
-				err := f()
-				if err != nil {
-					fmt.Println("Signal error func")
-					signalError <- true
+	finishError = make(chan bool)
+	doneError = make(chan bool)
+	go func() {
+		errorCnt := 0
+		for {
+			select {
+			case <-errOut:
+				errorCnt++
+				if errorCnt == maxErrorCnt {
+					close(doneError)
+					return
 				}
-			}(signalError, tasks[0], runningChan)
-			if len(tasks) == 1 {
-				fmt.Println("Signal stop")
-				signalStop <- true
-			} else {
-				tasks = tasks[1:]
+			case <-finishError:
+				return
 			}
+		}
+	}()
+
+out:
+	for _, task := range tasks {
+		select {
+		case taskChan <- task:
+			waitgroup.Add(1)
+		case <-doneError:
+			break out
 		}
 	}
+
+	doneWorkers = make(chan bool)
+	go func() {
+		waitgroup.Wait()
+		doneWorkers <- true
+	}()
+
+	for {
+		select {
+		case <-doneError:
+			close(finishAll)
+			return
+		case <-doneWorkers:
+			close(finishError)
+			close(finishAll)
+			return
+		}
+	}
+
+}
+
+func worker(task <-chan func() error, errOut chan bool, finishAll <-chan bool, waitgroup *sync.WaitGroup) {
+	for {
+		select {
+		case task := <-task:
+			err := task()
+			waitgroup.Done()
+			if err != nil {
+				errOut <- true
+			}
+		case <-finishAll:
+			return
+		}
+	}
+
 }
