@@ -1,10 +1,7 @@
 package otus8
 
 import (
-	"errors"
-	"fmt"
 	"sync"
-	"time"
 )
 
 func Starting(tasks []func() error, workersCnt, maxErrorCnt int) {
